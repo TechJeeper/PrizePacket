@@ -1,0 +1,200 @@
+﻿Project Name: PrizePacket
+Version: 1.1.0
+Type: Web Application (PHP/MySQL)
+1. Project Overview
+PrizePacket is a self-hosted web application designed for content creators to manage giveaways across multiple platforms (Twitch, YouTube, Google Forms). It handles the full lifecycle of a giveaway: Inventory management -> Entrant Aggregation -> Winner Selection -> Fulfillment Tracking.
+Core Objective: Create a unified dashboard that ingests entrant data from disparate APIs, normalizes it, and manages the logistics of prize distribution.
+2. Technology Stack & Requirements
+The AI Builder should utilize the following stack to ensure stability and OAuth security.
+* Backend Framework: PHP 8.2+ (Recommended: Laravel 10/11)
+   * Reasoning: Native handling of Socialite (OAuth) for Twitch/Google/YouTube is required to reduce boilerplate security risks.
+* Database: MySQL 8.0+
+* Frontend: Blade Templates (server-side rendering) + Tailwind CSS (styling) + Alpine.js (lightweight interactivity for the "Draw" animation).
+* Dependencies:
+   * google/apiclient: For YouTube Live Chat & Sheets API.
+   * socialiteproviders/twitch: For Twitch Auth.
+   * socialiteproviders/youtube: For YouTube Auth.
+3. Database Schema (SQL Structure)
+Use this exact schema to build the migrations.
+-- 1. Users (The Admins/Streamers)
+CREATE TABLE users (
+   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+   name VARCHAR(255) NOT NULL,
+   email VARCHAR(255) UNIQUE NOT NULL,
+   password VARCHAR(255) NOT NULL,
+   remember_token VARCHAR(100),
+   created_at TIMESTAMP NULL,
+   updated_at TIMESTAMP NULL
+);
+
+-- 2. Service Credentials (Stores OAuth Tokens per user)
+CREATE TABLE service_credentials (
+   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+   user_id BIGINT UNSIGNED NOT NULL,
+   service_name VARCHAR(50) NOT NULL, -- 'google', 'twitch'
+   service_id VARCHAR(255), -- Remote ID
+   access_token TEXT,
+   refresh_token TEXT,
+   expires_at TIMESTAMP NULL,
+   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- 3. Inventory Items (The Prize Pool)
+CREATE TABLE inventory_items (
+   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+   user_id BIGINT UNSIGNED NOT NULL,
+   item_name VARCHAR(255) NOT NULL,
+   sponsor_name VARCHAR(255) NULL,
+   image_url VARCHAR(255) NULL,
+   value_estimated DECIMAL(8,2) DEFAULT 0.00,
+   qty_total INT DEFAULT 1,
+   qty_remaining INT DEFAULT 1,
+   notes TEXT NULL,
+   created_at TIMESTAMP NULL,
+   updated_at TIMESTAMP NULL,
+   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- 4. Campaigns (The Event Container, e.g., "Holiday Stream")
+CREATE TABLE campaigns (
+   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+   user_id BIGINT UNSIGNED NOT NULL,
+   name VARCHAR(255) NOT NULL,
+   status ENUM('draft', 'active', 'completed') DEFAULT 'draft',
+   start_date DATETIME NULL,
+   created_at TIMESTAMP NULL,
+   updated_at TIMESTAMP NULL,
+   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- 5. Entrants (Temporary holding for active draws)
+-- Note: This table is flushed or archived after campaigns to protect PII
+CREATE TABLE entrants (
+   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+   campaign_id BIGINT UNSIGNED NOT NULL,
+   platform ENUM('twitch', 'youtube', 'google_sheet', 'manual') NOT NULL,
+   platform_user_id VARCHAR(255) NULL, -- Unique ID on platform
+   platform_username VARCHAR(255) NOT NULL, -- Display Name
+   entry_source_detail VARCHAR(255) NULL, -- e.g., 'Sheet Row 4' or 'Chat Log ID'
+   is_subscriber BOOLEAN DEFAULT 0,
+   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+   UNIQUE KEY unique_entry (campaign_id, platform, platform_user_id),
+   FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+);
+
+-- 6. Winners (The Permanent Ledger)
+CREATE TABLE winners (
+   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+   user_id BIGINT UNSIGNED NOT NULL, -- Owner of the data
+   campaign_id BIGINT UNSIGNED NULL,
+   inventory_item_id BIGINT UNSIGNED NULL,
+   winner_display_name VARCHAR(255) NOT NULL,
+   platform_origin VARCHAR(50) NOT NULL,
+   
+   -- Fulfillment Tracking
+   contact_email VARCHAR(255) NULL,
+   shipping_address TEXT NULL,
+   
+   -- Workflow Booleans
+   status_winner_notified BOOLEAN DEFAULT 0,
+   status_info_collected BOOLEAN DEFAULT 0,
+   status_sent_to_sponsor BOOLEAN DEFAULT 0,
+   status_shipped BOOLEAN DEFAULT 0,
+   
+   notes TEXT NULL,
+   won_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+   
+   FOREIGN KEY (user_id) REFERENCES users(id),
+   FOREIGN KEY (campaign_id) REFERENCES campaigns(id),
+   FOREIGN KEY (inventory_item_id) REFERENCES inventory_items(id)
+);
+
+4. Feature Specifications & Logic
+Module A: Authentication & Service Connections
+* Goal: User connects Twitch and Google accounts once.
+* Logic:
+   * Use Laravel Socialite.
+   * Google Scopes: https://www.googleapis.com/auth/spreadsheets.readonly, https://www.googleapis.com/auth/youtube.readonly.
+   * Twitch Scopes: chat:read, moderator:read:chatters.
+   * Store refresh_token in service_credentials table.
+   * Implement a Middleware that checks token expiration before making API calls and refreshes if necessary.
+Module B: The "Ingest" Engine (API Logic)
+This is the core logic for populating the entrants table.
+1. Google Sheets Integration
+* Input: User provides Spreadsheet ID and Sheet Name.
+* Mapping: UI asks user to map "Username Column" (e.g., Column A).
+* Process: Fetch all rows -> Filter empty -> Deduplicate based on Username -> Insert into entrants.
+2. Twitch Chat Integration
+* Input: User defines a Keyword (e.g., "!win").
+* Process:
+   * Connect to Twitch TMI (IRC) or Helix API.
+   * Listen for messages containing specific Keyword.
+   * Deduplication: Check if platform_user_id already exists in entrants for this campaign_id. If not, insert.
+3. YouTube Live Integration
+* Process:
+   * Call liveBroadcasts.list to get active liveChatId.
+   * Poll liveChatMessages.list (Warning: Respect pagination tokens and sleep intervals).
+   * Filter by text snippet (Keyword).
+   * Insert unique authorDetails.channelId into entrants.
+Module C: The Draw System (Frontend Logic)
+* Route: /campaign/{id}/draw
+* UI Layout:
+   * Left Column: "Prize Selector" (Dropdown of Inventory Items assigned to campaign).
+   * Center: Large "Rolling" Animation Window.
+   * Right Column: "Recent Winners" list.
+* The Algorithm (Backend Endpoint):
+   * POST /api/draw
+   * Params: campaign_id, filters (e.g., "Subscribers Only").
+   * Query: SELECT * FROM entrants WHERE campaign_id = X ORDER BY RAND() LIMIT 1.
+   * Constraint: Ensure selected user is NOT already in winners table for this campaign (prevent double winning).
+* Action:
+   * On "Confirm Winner":
+      1. Create record in winners table.
+      2. Decrement inventory_items.qty_remaining.
+      3. Return success to UI.
+Module D: Fulfillment Dashboard (CRM)
+* View: Table listing all rows from winners.
+* Actions (AJAX Toggles):
+   * Clicking "Notified" icon toggles status_winner_notified (True/False).
+   * Clicking "Shipped" icon toggles status_shipped.
+* Edit Modal: Allows Admin to paste in Name/Address/Email for the winner.
+* Export Feature: "Export CSV" button.
+   * Logic: Select Sponsor Name -> Generate CSV of all winners associated with items from that Sponsor.
+Module E: Automated Installer (Setup Mechanism)
+* Goal: Allow easy deployment on shared hosting or VPS without CLI access.
+* Route: /install (Middleware: Redirect here if .env file is missing or APP_KEY is not set).
+* Step 1: Environment Check
+   * Verify PHP Version >= 8.2.
+   * Verify Extensions: pdo_mysql, openssl, curl, json.
+* Step 2: Database Configuration Form
+   * Fields: DB Host, DB Port, DB Name, DB User, DB Password.
+* Step 3: Setup Execution
+   * Action: Generate .env file from inputs.
+   * Action: Run Artisan::call('migrate --force') to build the schema.
+   * Action: Run Artisan::call('key:generate').
+   * Action: Create the first Admin User (email/password).
+   * Finalize: Redirect to /login with success message.
+5. UI/UX Page Structure (Sitemap)
+1. Installer: (Conditional) Wizard for initial server setup.
+2. Dashboard (Home): Summary stats (Active Campaign, Total Inventory Value).
+3. Inventory Manager:
+   * List View (Data Tables).
+   * "Add Item" Modal (Image upload, Name, Qty).
+4. Campaign Manager:
+   * "Setup Campaign": Name event, select inventory to allocate.
+   * "Ingest Console": Buttons to Sync Google Sheets or Open Chat Connection.
+5. Live Draw Deck: The full-screen interface used during streaming (OBS friendly - high contrast).
+6. PrizePacket CRM (Fulfillment): The post-stream management list.
+7. Settings: API connections (Connect Google/Twitch buttons).
+6. Implementation Prompts (For AI Agent)
+If generating this project in stages, use these prompts:
+Step 1: Scaffolding
+"Create a new Laravel project named PrizePacket. Install Socialite. Set up the MySQL database connection and generate the migration files based on the Schema provided in Section 3 of the design doc."
+Step 2: Inventory CRUD
+"Build a Resource Controller for InventoryItems. Create a Blade view using Tailwind CSS to display the items in a responsive grid. Include a modal to add new items."
+Step 3: The Integrations
+"Create a Service class named EntrantIngestService. Add a method syncFromGoogleSheet($sheetId, $column) using the Google Client PHP library. Ensure it iterates through rows and saves to the entrants table using the updateOrInsert method to prevent duplicates."
+Step 4: The Draw
+"Create a DrawController. The spin method should accept a campaign ID. It must select one random user from the entrants table who is not present in the winners table. Return the winner as JSON."
+Step 5: The Installer
+"Create a SetupController and an /install route. The controller should check if the app is already installed. If not, show a form to input Database credentials. On submit, write these to the .env file and programmatically run the migration command to set up the tables and create the first admin user."
