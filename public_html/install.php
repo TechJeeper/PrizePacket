@@ -28,10 +28,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             // Test Connection
             $dsn = "mysql:host=$dbHost;dbname=$dbName;charset=utf8mb4";
-            $pdo = new PDO($dsn, $dbUser, $dbPass, [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            ]);
+            try {
+                $pdo = new PDO($dsn, $dbUser, $dbPass, [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                ]);
+            } catch (PDOException $e) {
+                // If localhost fails, suggest 127.0.0.1
+                if ($dbHost === 'localhost' && strpos($e->getMessage(), 'No such file or directory') !== false) {
+                     throw new Exception("Connection failed: " . $e->getMessage() . ". Try using '127.0.0.1' instead of 'localhost'.");
+                }
+                throw $e;
+            }
 
             // Write config.php
             $configContent = "<?php\n\n";
@@ -199,7 +207,8 @@ SQL;
 
                     <div class="mb-4">
                         <label class="block text-gray-700 text-sm font-bold mb-2" for="db_host">Host</label>
-                        <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" id="db_host" name="db_host" type="text" placeholder="localhost" value="<?= isset($_POST['db_host']) ? htmlspecialchars($_POST['db_host']) : 'localhost' ?>">
+                        <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" id="db_host" name="db_host" type="text" placeholder="127.0.0.1" value="<?= isset($_POST['db_host']) ? htmlspecialchars($_POST['db_host']) : '127.0.0.1' ?>">
+                        <p class="text-xs text-gray-500 mt-1">Try '127.0.0.1' if 'localhost' fails.</p>
                     </div>
 
                     <div class="mb-4">
